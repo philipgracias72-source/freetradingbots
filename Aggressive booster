@@ -1,0 +1,76 @@
+//+------------------------------------------------------------------+ //| MT5 Drift Robot - Simple Expert Advisor                          | //| Features:                                                         | //| - Basic pre-entry analysis (MA crossover + RSI + spread check)     | //| - Market (instant) entries with TP/SL                              | //| - Monitors open trades and when any position reaches TP level it   | //|   will immediately close all other positions for the same symbol   | //| - Configurable inputs for risk/size, filters and thresholds        | //| NOTE: Backtest and run on demo before using on a live account     | //+------------------------------------------------------------------+ #include <Trade/Trade.mqh>
+
+input int    FastMAPeriod    = 10;          // Fast MA period input int    SlowMAPeriod    = 30;          // Slow MA period input ENUM_MA_METHOD MaMethod= MODE_SMA;    // MA method input ENUM_APPLIED_PRICE MaPrice = PRICE_CLOSE; // MA applied price input int    RSI_Period      = 14;          // RSI period input int    RSI_Upper       = 60;          // RSI upper threshold input int    RSI_Lower       = 40;          // RSI lower threshold input double TakeProfitPips = 20.0;        // TP in pips input double StopLossPips   = 50.0;        // SL in pips (0 = none) input double Volume         = 0.01;        // Fixed volume (lots) if UseRisk=false input bool   UseRiskPercent = false;       // Use risk-based sizing input double RiskPercent    = 1.0;         // Risk % of account balance per trade input double MaxSpread      = 20.0;        // Max spread in points (not pips) input ulong  MagicNumber    = 20250913;    // Magic number for EA input bool   AllowLong      = true;        // Allow buy trades input bool   AllowShort     = true;        // Allow sell trades input ENUM_TIMEFRAMES TF   = PERIOD_CURRENT; // Timeframe for indicators
+
+CTrade trade;
+
+//+------------------------------------------------------------------+ void OnInit() { // nothing special needed Print("MT5 Drift Robot initialized. Magic = ",MagicNumber); }
+
+//+------------------------------------------------------------------+ void OnTick() { string symbol = _Symbol;
+
+// 1) basic checks: spread, trading allowed double spread = (SymbolInfoDouble(symbol,SYMBOL_ASK)-SymbolInfoDouble(symbol,SYMBOL_BID))/SymbolInfoDouble(symbol,SYMBOL_POINT); if(spread>MaxSpread) { // too wide, don't trade return; }
+
+// 2) compute indicators double maFast = iMA(symbol,TF,FastMAPeriod,0,MaMethod,MaPrice,0); double maSlow = iMA(symbol,TF,SlowMAPeriod,0,MaMethod,MaPrice,0); double rsi    = iRSI(symbol,TF,RSI_Period,MaPrice,0);
+
+// 3) ensure no other EA positions with same magic for this symbol if(HasPositionWithMagic(symbol,MagicNumber)) { // we allow multiple positions sometimes; here we skip opening additional ones // remove the return if you want martingale or stacking behavior }
+
+// 4) generate signals bool buySignal = (AllowLong && maFast>maSlow && rsi>RSI_Lower); bool sellSignal= (AllowShort && maFast<maSlow && rsi<RSI_Upper);
+
+// 5) entry logic - only enter if there are no current positions with our magic for this symbol if(!HasPositionWithMagic(symbol,MagicNumber)) { if(buySignal) OpenBuy(symbol); else if(sellSignal) OpenSell(symbol); }
+
+// 6) monitor open positions: if any reaches its TP level (in price), close all positions for symbol with our magic MonitorTPandClose(symbol); }
+
+//+------------------------------------------------------------------+ void OpenBuy(string symbol) { double ask = SymbolInfoDouble(symbol,SYMBOL_ASK); double point=SymbolInfoDouble(symbol,SYMBOL_POINT); double sl=0, tp=0; if(StopLossPips>0) sl = ask - StopLossPipspoint; if(TakeProfitPips>0) tp = ask + TakeProfitPipspoint;
+
+double lots = CalculateLots(symbol,ask);
+
+trade.SetExpertMagicNumber(MagicNumber); trade.SetDeviationInPoints(20); bool res = trade.Buy(lots,NULL,ask,sl,tp); if(res) PrintFormat("Buy opened: %s lots=%.2f TP=%.1f SL=%.1f",symbol,lots,TakeProfitPips,StopLossPips); else Print("Buy failed: ",trade.ResultRetcode()," - ",trade.ResultComment()); }
+
+//+------------------------------------------------------------------+ void OpenSell(string symbol) { double bid = SymbolInfoDouble(symbol,SYMBOL_BID); double point=SymbolInfoDouble(symbol,SYMBOL_POINT); double sl=0, tp=0; if(StopLossPips>0) sl = bid + StopLossPipspoint; if(TakeProfitPips>0) tp = bid - TakeProfitPipspoint;
+
+double lots = CalculateLots(symbol,bid);
+
+trade.SetExpertMagicNumber(MagicNumber); trade.SetDeviationInPoints(20); bool res = trade.Sell(lots,NULL,bid,sl,tp); if(res) PrintFormat("Sell opened: %s lots=%.2f TP=%.1f SL=%.1f",symbol,lots,TakeProfitPips,StopLossPips); else Print("Sell failed: ",trade.ResultRetcode()," - ",trade.ResultComment()); }
+
+//+------------------------------------------------------------------+ double CalculateLots(string symbol,double price) { if(!UseRiskPercent) return(NormalizeVolume(symbol,Volume));
+
+// risk-based simple sizing: risk % of balance -> assume StopLossPips defined if(StopLossPips<=0) { Print("StopLossPips must be >0 when using risk percent. Falling back to fixed Volume."); return(NormalizeVolume(symbol,Volume)); }
+
+double balance = AccountInfoDouble(ACCOUNT_BALANCE); double riskMoney = balance * RiskPercent/100.0; double point = SymbolInfoDouble(symbol,SYMBOL_POINT); double tickValue = SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_VALUE); double tickSize  = SymbolInfoDouble(symbol,SYMBOL_TRADE_TICK_SIZE);
+
+// approximate pips value per lot: value = (StopLossPips * tickValue / tickSize) * lots double valuePerLotPerPip = (tickValue / tickSize); double lot = riskMoney / (StopLossPips * valuePerLotPerPip); return(NormalizeVolume(symbol,lot)); }
+
+//+------------------------------------------------------------------+ bool HasPositionWithMagic(string symbol,ulong magic) { for(int i=0;i<PositionsTotal();i++) { if(PositionSelectByIndex(i)) { if(PositionGetString(POSITION_SYMBOL)==symbol && (ulong)PositionGetInteger(POSITION_MAGIC)==magic) return true; } } return false; }
+
+//+------------------------------------------------------------------+ void MonitorTPandClose(string symbol) { double point = SymbolInfoDouble(symbol,SYMBOL_POINT);
+
+for(int i=PositionsTotal()-1;i>=0;i--) { if(!PositionSelectByIndex(i)) continue; string psym = PositionGetString(POSITION_SYMBOL); ulong pmagic = (ulong)PositionGetInteger(POSITION_MAGIC); ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET); double open_price = PositionGetDouble(POSITION_PRICE_OPEN); long type = (int)PositionGetInteger(POSITION_TYPE); // POSITION_TYPE_BUY=1, SELL=2
+
+if(psym!=symbol || pmagic!=MagicNumber) continue;
+
+  double targetPrice = 0.0;
+  if(type==POSITION_TYPE_BUY)
+     targetPrice = open_price + TakeProfitPips*point;
+  else if(type==POSITION_TYPE_SELL)
+     targetPrice = open_price - TakeProfitPips*point;
+
+  double currentPrice = (type==POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol,SYMBOL_BID) : SymbolInfoDouble(symbol,SYMBOL_ASK);
+
+  if(TakeProfitPips>0 && ((type==POSITION_TYPE_BUY && currentPrice>=targetPrice) || (type==POSITION_TYPE_SELL && currentPrice<=targetPrice)))
+    {
+     Print("TP level reached for position ",ticket," - closing all positions for symbol ",symbol);
+     CloseAllPositionsForSymbolAndMagic(symbol,MagicNumber);
+     return; // done for now
+    }
+ }
+
+}
+
+//+------------------------------------------------------------------+ void CloseAllPositionsForSymbolAndMagic(string symbol,ulong magic) { // iterate positions and close those that match for(int i=PositionsTotal()-1;i>=0;i--) { if(!PositionSelectByIndex(i)) continue; string psym = PositionGetString(POSITION_SYMBOL); ulong pmagic = (ulong)PositionGetInteger(POSITION_MAGIC); ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET); if(psym==symbol && pmagic==magic) { bool ok = trade.PositionClose(ticket); if(!ok) PrintFormat("Failed to close position %I64u: %d - %s",ticket,trade.ResultRetcode(),trade.ResultComment()); else PrintFormat("Closed position %I64u",ticket); } } }
+
+//+------------------------------------------------------------------+ double NormalizeVolume(string symbol,double vol) { double minlot=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN); double maxlot=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX); double step  =SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP); if(step<=0) step=0.01; vol = MathMax(vol,minlot); vol = MathMin(vol,maxlot); // normalize by step double steps = MathRound(vol/step); return(steps*step); }
+
+//+------------------------------------------------------------------+ void OnDeinit(const int reason) { Print("MT5 Drift Robot stopped."); }
+
+//+------------------------------------------------------------------+
+
